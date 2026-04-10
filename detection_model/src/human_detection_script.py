@@ -1,0 +1,540 @@
+#!/usr/bin/env python3
+
+import importlib.util
+import os
+from pathlib import Path
+import threading
+import time
+import numpy as np
+
+import rclpy
+from ament_index_python.packages import get_package_share_directory
+from cv_bridge import CvBridge
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image
+from ultralytics import YOLO
+from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
+from filterpy.kalman import KalmanFilter
+from filterpy.common import Q_discrete_white_noise
+
+
+class DetectionEKF:
+    """
+    EKF for smoothing detection measurements and predicting during occlusions.
+    State: [x_center, y_center, width, height, vx, vy, vw, vh]
+    """
+    def __init__(self, dt=0.05):
+        self.dt = dt
+        self.kf = KalmanFilter(dim_x=8, dim_z=4)
+        
+        # State transition
+        self.kf.F = np.array([
+            [1, 0, 0, 0, dt, 0,  0,  0 ],
+            [0, 1, 0, 0, 0,  dt, 0,  0 ],
+            [0, 0, 1, 0, 0,  0,  dt, 0 ],
+            [0, 0, 0, 1, 0,  0,  0,  dt],
+            [0, 0, 0, 0, 1,  0,  0,  0 ],
+            [0, 0, 0, 0, 0,  1,  0,  0 ],
+            [0, 0, 0, 0, 0,  0,  1,  0 ],
+            [0, 0, 0, 0, 0,  0,  0,  1 ]
+        ])
+        
+        # Measurement function
+        self.kf.H = np.array([
+            [1, 0, 0, 0, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0, 0, 0, 0],
+            [0, 0, 1, 0, 0, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0, 0]
+        ])
+        
+        # Process noise
+        self.kf.Q = Q_discrete_white_noise(dim=4, dt=dt, var=0.1, block_size=2)
+        
+        # Measurement noise (adaptive)
+        self.kf.R = np.eye(4) * 0.5
+        
+        # Initial covariance
+        self.kf.P *= 10
+        
+        self.is_initialized = False
+        self.last_update_time = 0.0
+        
+    def update_measurement_noise(self, confidence):
+        """Higher confidence = lower measurement noise"""
+        base_noise = 0.5
+        noise = base_noise / max(confidence, 0.1)
+        self.kf.R = np.eye(4) * noise
+        
+    def predict(self):
+        self.kf.predict()
+        
+    def update(self, bbox_center_x, bbox_center_y, bbox_width, bbox_height, confidence=1.0):
+        measurement = np.array([bbox_center_x, bbox_center_y, bbox_width, bbox_height])
+        self.update_measurement_noise(confidence)
+        self.kf.update(measurement)
+        self.last_update_time = time.time()
+        self.is_initialized = True
+        
+    def get_smoothed_bbox(self):
+        """Return smoothed bounding box as Python floats"""
+        if not self.is_initialized:
+            return None
+        x = self.kf.x
+        # ==================== FIX: Convert all to Python floats ====================
+        return {
+            'center_x': float(x[0]),
+            'center_y': float(x[1]),
+            'width': float(x[2]),
+            'height': float(x[3]),
+            'velocity_x': float(x[4]),
+            'velocity_y': float(x[5])
+        }
+        
+    def get_predicted_bbox(self, horizon_sec=0.1):
+        """Predict bbox N seconds in the future as Python floats"""
+        if not self.is_initialized:
+            return None
+        steps = int(horizon_sec / self.dt)
+        x_pred = self.kf.x.copy()
+        for _ in range(steps):
+            x_pred = self.kf.F @ x_pred
+        # ==================== FIX: Convert all to Python floats ====================
+        return {
+            'center_x': float(x_pred[0]),
+            'center_y': float(x_pred[1]),
+            'width': float(x_pred[2]),
+            'height': float(x_pred[3])
+        }
+
+
+class YoloTrackerNode(Node):
+    def __init__(self):
+        super().__init__('yolo_tracker_detector')
+
+        # Parameters
+        self.declare_parameter('input_topic', '/camera/image')
+        self.declare_parameter('detections_topic', 'detections')
+        self.declare_parameter('debug_topic', 'yolo_debug_image')
+        self.declare_parameter('model_variant', 'yolo11n')
+        self.declare_parameter('backend_device', 'auto')
+        self.declare_parameter('custom_model_path', '')
+        self.declare_parameter('publish_debug_image', False)
+        self.declare_parameter('imgsz', 384)
+        self.declare_parameter('conf', 0.25)
+        self.declare_parameter('max_det', 20)
+        self.declare_parameter('use_half_precision', True)
+        self.declare_parameter('use_ekf_smoothing', True)
+        self.declare_parameter('target_class', 'person')
+        
+        # Camera parameters
+        self.declare_parameter('image_width', 640)
+        self.declare_parameter('image_height', 480)
+        self.declare_parameter('image_center_x', 320.0)
+        self.declare_parameter('image_center_y', 240.0)
+
+        self.input_topic = str(self.get_parameter('input_topic').value)
+        self.detections_topic = str(self.get_parameter('detections_topic').value)
+        self.debug_topic = str(self.get_parameter('debug_topic').value)
+        self.model_variant = str(self.get_parameter('model_variant').value).strip().lower()
+        self.backend_device = self._resolve_backend_device(str(self.get_parameter('backend_device').value).strip())
+        self.custom_model_path = str(self.get_parameter('custom_model_path').value).strip()
+        self.publish_debug_image = bool(self.get_parameter('publish_debug_image').value)
+        self.imgsz = int(self.get_parameter('imgsz').value)
+        self.conf = float(self.get_parameter('conf').value)
+        self.max_det = int(self.get_parameter('max_det').value)
+        self.use_half_precision = self.backend_device != 'cpu' and self._parameter_truthy('use_half_precision', True)
+        self.use_ekf_smoothing = bool(self.get_parameter('use_ekf_smoothing').value)
+        self.target_class = str(self.get_parameter('target_class').value)
+        
+        # Camera center
+        self.img_width = self.get_parameter('image_width').value
+        self.img_height = self.get_parameter('image_height').value
+        self.cx = self.get_parameter('image_center_x').value
+        self.cy = self.get_parameter('image_center_y').value
+
+        if self.max_det < 1:
+            self.max_det = 1
+
+        # EKF for detection smoothing
+        self.detection_ekf = DetectionEKF(dt=0.05) if self.use_ekf_smoothing else None
+        
+        # Track the best target
+        self.current_target_id = None
+        self.target_lost_count = 0
+        self.max_lost_frames = 10
+
+        self.model_path, self.selected_backend = self._resolve_model_path()
+        if self.selected_backend == 'ncnn' and self.imgsz != 640:
+            self.get_logger().warn(
+                f"ncnn backend works best with imgsz=640; forcing imgsz=640 from {self.imgsz}"
+            )
+            self.imgsz = 640
+
+        try:
+            self.model = YOLO(self.model_path, task='detect')
+            self.get_logger().info(
+                f"{self.selected_backend.upper()} model loaded: {self.model_path} on device={self.backend_device}"
+            )
+        except Exception as e:
+            raise RuntimeError(f'Load Error: {e}') from e
+
+        self.bridge = CvBridge()
+        self.publisher = self.create_publisher(Detection2DArray, self.detections_topic, 10)
+        self.image_pub = self.create_publisher(Image, self.debug_topic, 10)
+        self.subscription = self.create_subscription(
+            Image,
+            self.input_topic,
+            self.image_callback,
+            qos_profile_sensor_data,
+        )
+
+        self._frame_lock = threading.Lock()
+        self._new_frame_event = threading.Event()
+        self._stop_event = threading.Event()
+        self._is_destroyed = False
+        self._pending_frame = None
+        self._frames_in = 0
+        self._frames_processed = 0
+        self._frames_overwritten = 0
+        self._latency_sum_ms = 0.0
+        self._latency_count = 0
+
+        self.worker_thread = threading.Thread(target=self.inference_worker, daemon=True)
+        self.worker_thread.start()
+        self.status_timer = self.create_timer(5.0, self.log_status)
+
+        self.get_logger().info(
+            f"Ready: Image center=({self.cx}, {self.cy}), "
+            f"EKF={self.use_ekf_smoothing}, debug={self.publish_debug_image}"
+        )
+
+    def _parameter_truthy(self, name, default=False):
+        value = self.get_parameter(name).value if self.has_parameter(name) else default
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    @staticmethod
+    def _resolve_backend_device(requested_device):
+        if requested_device and requested_device != 'auto':
+            return requested_device
+
+        if importlib.util.find_spec('torch') is not None:
+            import torch
+
+            if torch.cuda.is_available():
+                return '0'
+
+        return 'cpu'
+
+    @staticmethod
+    def _module_available(module_name):
+        return importlib.util.find_spec(module_name) is not None
+
+    @staticmethod
+    def _first_existing_path(candidates):
+        for candidate in candidates:
+            if candidate and os.path.exists(candidate):
+                return candidate
+        return ''
+
+    @staticmethod
+    def _first_existing_or_default(candidates):
+        existing = YoloTrackerNode._first_existing_path(candidates)
+        return existing if existing else candidates[0]
+
+    def _resolve_model_path(self):
+        if self.custom_model_path:
+            return self.custom_model_path, 'custom'
+
+        package_share = get_package_share_directory('detection_model')
+        workspace_root = Path(__file__).resolve().parents[3]
+        onnx_candidates = [
+            os.path.join(
+                get_package_share_directory('model_interface_publisher'),
+                'model',
+                'top_model_best.onnx',
+            ),
+            str(workspace_root / 'src' / 'model_interface_publisher' / 'model' / 'top_model_best.onnx'),
+        ]
+
+        yolo11n_candidates = [
+            'yolo11n.pt',
+            os.path.join(
+                get_package_share_directory('model_interface_publisher'),
+                'model',
+                'yolo11n.pt',
+            ),
+            str(workspace_root / 'src' / 'model_interface_publisher' / 'model' / 'yolo11n.pt'),
+        ]
+
+        model_candidates = {
+            'yolo11n': ('torch', yolo11n_candidates),
+            'pt': ('torch', [
+                os.path.join(
+                    get_package_share_directory('model_interface_publisher'),
+                    'model',
+                    'top_model_best.pt',
+                ),
+                str(workspace_root / 'src' / 'model_interface_publisher' / 'model' / 'top_model_best.pt'),
+            ]),
+            'onnx': ('onnxruntime', onnx_candidates),
+            'openvino': ('openvino', [os.path.join(package_share, 'model', 'yolo26n_openvino_model')]),
+            'ncnn': ('ncnn', [os.path.join(package_share, 'model', 'yolo26n_ncnn_model')]),
+        }
+
+        variant = self.model_variant.strip().lower()
+        if variant == 'auto':
+            search_order = ['yolo11n', 'pt', 'onnx', 'openvino', 'ncnn']
+        else:
+            search_order = [variant]
+
+        for backend in search_order:
+            if backend not in model_candidates:
+                raise ValueError(
+                    f"Unsupported model_variant='{self.model_variant}'. Use one of: auto, yolo11n, pt, onnx, openvino, ncnn"
+                )
+
+            module_name, candidates = model_candidates[backend]
+            if not self._module_available(module_name):
+                continue
+
+            if backend == 'yolo11n':
+                model_path = self._first_existing_or_default(candidates)
+            else:
+                model_path = self._first_existing_path(candidates)
+            if model_path:
+                return model_path, backend
+
+        raise RuntimeError(
+            "No supported model backend is available. "
+            "Install one of: torch, onnxruntime, openvino, or ncnn, or set custom_model_path to a valid export. "
+            "The default auto mode prefers yolo11n.pt first, then the local PyTorch export."
+        )
+
+    def image_callback(self, msg):
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            with self._frame_lock:
+                if self._pending_frame is not None:
+                    self._frames_overwritten += 1
+                self._pending_frame = (msg.header, cv_image)
+                self._frames_in += 1
+                self._new_frame_event.set()
+        except Exception as e:
+            self.get_logger().error(f'Image callback error: {e}')
+
+    def inference_worker(self):
+        while not self._stop_event.is_set():
+            self._new_frame_event.wait(timeout=0.1)
+            self._new_frame_event.clear()
+
+            if self._stop_event.is_set():
+                break
+
+            with self._frame_lock:
+                item = self._pending_frame
+                self._pending_frame = None
+
+            if item is None:
+                continue
+
+            header, cv_image = item
+
+            try:
+                start_t = time.perf_counter()
+                results = self.model.predict(
+                    source=cv_image,
+                    classes=[0],  # person class
+                    imgsz=self.imgsz,
+                    conf=self.conf,
+                    max_det=self.max_det,
+                    device=self.backend_device,
+                    half=self.use_half_precision,
+                    verbose=False,
+                )
+                latency_ms = (time.perf_counter() - start_t) * 1000.0
+                self._latency_sum_ms += latency_ms
+                self._latency_count += 1
+
+                # Process detections
+                best_detection = None
+                best_confidence = 0.0
+                
+                for r in results:
+                    if self._stop_event.is_set():
+                        break
+
+                    # Find best person detection
+                    for box in r.boxes:
+                        confidence = float(box.conf[0])
+                        if confidence > best_confidence:
+                            best_confidence = confidence
+                            x1, y1, x2, y2 = box.xyxy[0].tolist()
+                            # ==================== FIX: Ensure Python floats ====================
+                            best_detection = {
+                                'x1': float(x1), 
+                                'y1': float(y1), 
+                                'x2': float(x2), 
+                                'y2': float(y2),
+                                'confidence': float(confidence),
+                                'class_id': int(box.cls[0]) if hasattr(box, 'cls') else 0
+                            }
+
+                # Update EKF with best detection
+                if best_detection and self.use_ekf_smoothing:
+                    center_x = (best_detection['x1'] + best_detection['x2']) / 2.0
+                    center_y = (best_detection['y1'] + best_detection['y2']) / 2.0
+                    width = best_detection['x2'] - best_detection['x1']
+                    height = best_detection['y2'] - best_detection['y1']
+                    
+                    self.detection_ekf.update(
+                        float(center_x), 
+                        float(center_y), 
+                        float(width), 
+                        float(height), 
+                        confidence=float(best_confidence)
+                    )
+                    self.target_lost_count = 0
+                elif self.use_ekf_smoothing:
+                    self.target_lost_count += 1
+                    
+                # Predict EKF forward
+                if self.use_ekf_smoothing:
+                    self.detection_ekf.predict()
+                    smoothed = self.detection_ekf.get_smoothed_bbox()
+                else:
+                    smoothed = None
+
+                # Build Detection2DArray message
+                det_array = Detection2DArray()
+                det_array.header = header
+
+                # Use smoothed detection if available and not lost too long
+                if smoothed and self.target_lost_count < self.max_lost_frames:
+                    det = Detection2D()
+                    # ==================== FIX: Ensure all are Python floats ====================
+                    det.bbox.center.position.x = float(smoothed['center_x'])
+                    det.bbox.center.position.y = float(smoothed['center_y'])
+                    det.bbox.size_x = float(smoothed['width'])
+                    det.bbox.size_y = float(smoothed['height'])
+                    
+                    hyp = ObjectHypothesisWithPose()
+                    hyp.hypothesis.class_id = self.target_class
+                    hyp.hypothesis.score = float(best_confidence if best_detection else 0.5)
+                    det.results.append(hyp)
+                    det_array.detections.append(det)
+                    
+                elif best_detection and not self.use_ekf_smoothing:
+                    # Raw detection without EKF
+                    det = Detection2D()
+                    # ==================== FIX: Ensure all are Python floats ====================
+                    det.bbox.center.position.x = float((best_detection['x1'] + best_detection['x2']) / 2.0)
+                    det.bbox.center.position.y = float((best_detection['y1'] + best_detection['y2']) / 2.0)
+                    det.bbox.size_x = float(best_detection['x2'] - best_detection['x1'])
+                    det.bbox.size_y = float(best_detection['y2'] - best_detection['y1'])
+                    
+                    hyp = ObjectHypothesisWithPose()
+                    hyp.hypothesis.class_id = self.target_class
+                    hyp.hypothesis.score = float(best_confidence)
+                    det.results.append(hyp)
+                    det_array.detections.append(det)
+
+                # Publish debug image
+                if self.publish_debug_image and len(results) > 0:
+                    annotated_frame = results[0].plot()
+                    if smoothed:
+                        # Draw smoothed bbox in different color
+                        import cv2
+                        x1 = int(smoothed['center_x'] - smoothed['width']/2)
+                        y1 = int(smoothed['center_y'] - smoothed['height']/2)
+                        x2 = int(smoothed['center_x'] + smoothed['width']/2)
+                        y2 = int(smoothed['center_y'] + smoothed['height']/2)
+                        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(annotated_frame, "EKF", (x1, y1-10), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    
+                    img_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding='bgr8')
+                    img_msg.header = header
+                    try:
+                        self.image_pub.publish(img_msg)
+                    except Exception:
+                        if self._stop_event.is_set():
+                            break
+                        raise
+
+                # Publish detections
+                if self._stop_event.is_set():
+                    continue
+
+                try:
+                    self.publisher.publish(det_array)
+                except Exception:
+                    if self._stop_event.is_set():
+                        continue
+                    raise
+
+                self._frames_processed += 1
+
+            except Exception as e:
+                self.get_logger().error(f'Inference error: {e}')
+
+    def log_status(self):
+        avg_latency = (self._latency_sum_ms / self._latency_count) if self._latency_count else 0.0
+        status_msg = (
+            f'in={self._frames_in} processed={self._frames_processed} '
+            f'overwritten={self._frames_overwritten} avg_infer={avg_latency:.1f}ms'
+        )
+        if self.use_ekf_smoothing:
+            status_msg += f' ekf_lost={self.target_lost_count}'
+        self.get_logger().info(status_msg)
+
+    def destroy_node(self):
+        if self._is_destroyed:
+            return True
+        self._is_destroyed = True
+
+        self._stop_event.set()
+        self._new_frame_event.set()
+
+        try:
+            if hasattr(self, 'subscription') and self.subscription is not None:
+                self.destroy_subscription(self.subscription)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'status_timer') and self.status_timer is not None:
+                self.destroy_timer(self.status_timer)
+        except Exception:
+            pass
+
+        if hasattr(self, 'worker_thread') and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=1.0)
+
+        return super().destroy_node()
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = None
+    try:
+        node = YoloTrackerNode()
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        rclpy.logging.get_logger('yolo_tracker_detector').error(str(e))
+    finally:
+        try:
+            if node is not None:
+                node.destroy_node()
+        except Exception:
+            pass
+
+        if rclpy.ok():
+            rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
