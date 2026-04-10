@@ -1,0 +1,79 @@
+/**:
+  ros__parameters:
+
+    # ── Vision ─────────────────────────────────────────────────────────────────
+    target_class:       "person"
+    image_width:        640.0          # pixels – must match your camera config
+    image_height:       480.0
+    conf_threshold:     0.5            # min YOLO confidence to accept detection
+    target_box_height:  225.0          # bbox height in pixels at desired range
+    height_tolerance:   15.0           # dead-band: don't adjust within ±15 px
+
+    # ── Kalman filter ──────────────────────────────────────────────────────────
+    # kf_dt should match your control loop period (1/control_loop_hz)
+    kf_dt:              0.05           # seconds (= 20 Hz control loop)
+    kf_init_pos_std:    10.0           # pixels – initial position uncertainty
+    kf_init_vel_std:    50.0           # px/s   – initial velocity uncertainty
+
+    # KEY TUNING PARAMETER
+    # kf_accel_std: how much you trust the motion model vs measurements
+    #   LOW  (~1–5)  : smooth but lags sudden direction changes
+    #   MED  (~15–25): good balance for walking person
+    #   HIGH (~40+)  : basically follows YOLO; almost no smoothing
+    kf_accel_std:       20.0
+
+    kf_meas_std:        5.0            # pixels – YOLO bounding-box jitter
+    kf_gate_sigma:      4.0            # reject measurements > 4σ from prediction
+                                       # set to 0.0 to disable gating
+    kf_max_predict_sec: 1.0            # seconds KF can dead-reckon through occlusion
+
+    # Feed-forward: use KF velocity to pre-emptively yaw toward moving target
+    vel_ff_yaw:         0.00005        # (rad/s) / (px/s)  – set 0 to disable
+
+    # ── Altitude ───────────────────────────────────────────────────────────────
+    target_altitude:    3.0            # metres AGL
+
+    # ── Direction conventions (flip sign if drone moves wrong way) ─────────────
+    fwd_sign:           1.0            # 1.0 or -1.0
+    search_yaw_sign:   -1.0            # 1.0 or -1.0
+
+    # ── PID gains – longitudinal (box height = distance proxy) ─────────────────
+    # Start with ki=0, kd=0. Tune kp until drone holds distance.
+    # Then add kd to damp oscillation. Add ki last to remove steady-state offset.
+    kp_dist:            0.005
+    ki_dist:            0.0005
+    kd_dist:            0.001
+    int_dist_lim:       50.0
+
+    # ── PID gains – lateral strafe (pixel x error) ─────────────────────────────
+    kp_strafe:          0.003
+    ki_strafe:          0.0002
+    kd_strafe:          0.001
+    int_strafe_lim:     80.0
+
+    # ── PID gains – yaw assist ──────────────────────────────────────────────────
+    kp_yaw:             0.002
+    ki_yaw:             0.0001
+    kd_yaw:             0.0005
+    int_yaw_lim:        30.0
+    yaw_deadband_px:    30.0           # pixels – no yaw correction within ±30 px
+
+    # ── PID gains – altitude ────────────────────────────────────────────────────
+    kp_alt:             0.5
+    ki_alt:             0.05
+    kd_alt:             0.1
+    int_alt_lim:        1.0
+
+    # ── Velocity limits (hard clamps on all outputs) ────────────────────────────
+    max_vx:             1.0            # m/s
+    max_vy:             1.0
+    max_vz:             0.5
+    max_yaw_rate:       0.7            # rad/s
+
+    # ── Behaviour timers ────────────────────────────────────────────────────────
+    detection_timeout:  0.35           # s  YOLO hit older than this = stale
+    recovery_time:      2.0            # s  hold position before spiral search
+    search_speed:       0.8            # m/s during spiral search
+    initial_radius:     1.0            # m  initial spiral radius
+    spiral_growth:      0.1            # m/s  how fast spiral expands
+    log_interval_sec:   0.5            # s  throttle log messages
