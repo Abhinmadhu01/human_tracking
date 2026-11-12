@@ -3,6 +3,7 @@
 GStreamer video streamer with detection bounding box overlay.
 Subscribes to /camera/image_raw and /detections, draws bounding boxes
 on each frame, and streams the annotated video via UDP/H.264 to a laptop.
+
 """
 import os
 import rclpy
@@ -19,9 +20,15 @@ class GStreamerStreamer(Node):
     def __init__(self):
         super().__init__('gst_streamer')
 
-        # CONFIGURATION
-        self.laptop_ip = os.environ.get('GSTREAM_IP', '192.168.10.209')
-        self.port = 5000
+        # Set your laptop IP via GSTREAM_IP env variable or ROS param:
+        #   export GSTREAM_IP=192.168.x.x
+        #   or: ros2 run ... --ros-args -p laptop_ip:=192.168.x.x
+        default_ip = os.environ.get('GSTREAM_IP', '127.0.0.1')
+        self.declare_parameter('laptop_ip', default_ip)
+        self.declare_parameter('port', 5000)
+
+        self.laptop_ip = str(self.get_parameter('laptop_ip').value)
+        self.port = int(self.get_parameter('port').value)
         self.image_topic = '/camera/image_raw'
         self.det_topic = '/detections'
 
