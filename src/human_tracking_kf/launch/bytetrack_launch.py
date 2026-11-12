@@ -70,15 +70,16 @@ def generate_launch_description():
         default_value=tracker_config_default,
         description='Path to tracker parameter YAML file'
     )
+    # Override with: ros2 launch ... custom_model_path:=/path/to/your/model
     custom_model_path_default = os.path.join(
         get_package_share_directory('detection_model'),
         'model',
-        'yolov11n_base.rpk'
+        'yolo11n_base.rpk'
     )
     custom_model_path_arg = DeclareLaunchArgument(
         'custom_model_path',
         default_value=custom_model_path_default,
-        description='Path to custom YOLO model (empty to use model_variant)'
+        description='Path to custom YOLO model (empty to use model_variant auto-resolution)'
     )
     
     spawn_cfg = LaunchConfiguration('spawn_actor')

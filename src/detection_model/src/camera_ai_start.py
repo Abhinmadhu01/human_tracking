@@ -13,6 +13,12 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
+
+try:
+    from ament_index_python.packages import get_package_share_directory
+except ImportError:
+    get_package_share_directory = None
 
 import cv2
 import numpy as np
@@ -38,9 +44,9 @@ class CameraPublisher(Node):
         self.declare_parameter('fps', 30)
         self.declare_parameter('conf_threshold', 0.50)
         self.declare_parameter('nms_threshold', 0.45)
-        self.declare_parameter('model_path',
-            '/home/ros/top_human_detection/src/detection_model/model/'
-            'imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk')
+        # Just the model filename is enough — it gets found automatically.
+        # Or use a full path like /home/user/.../model.rpk
+        self.declare_parameter('model_path', 'imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk')
 
         resolution_str = str(self.get_parameter('resolution').value)
         self.resolution = tuple(map(int, resolution_str.split('x')))
@@ -108,12 +114,48 @@ class CameraPublisher(Node):
                 self.get_logger().info(f'Live Tuning: nms_threshold = {param.value}')
         return SetParametersResult(successful=True)
 
+    def _resolve_model_path(self, raw_path: str) -> str:
+        """Find the model file. Checks: given path → installed package → source folder."""
+        if not raw_path:
+            raw_path = 'imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk'
+
+        if os.path.exists(raw_path):
+            return os.path.abspath(raw_path)
+
+        filename = os.path.basename(raw_path)
+        candidates = []
+
+        # Check ROS2 installed package directory
+        if get_package_share_directory:
+            try:
+                pkg_share = get_package_share_directory('detection_model')
+                candidates.append(os.path.join(pkg_share, 'model', raw_path))
+                candidates.append(os.path.join(pkg_share, 'model', filename))
+            except Exception:
+                pass
+
+        # Check source folder next to this script
+        source_model_dir = Path(__file__).resolve().parents[1] / 'model'
+        candidates.append(str(source_model_dir / raw_path))
+        candidates.append(str(source_model_dir / filename))
+
+        for cand in candidates:
+            if os.path.exists(cand):
+                return os.path.abspath(cand)
+
+        return raw_path
+
     def _init_camera(self):
-        if not os.path.exists(self.model_path):
-            self.get_logger().error(f'RPK missing: {self.model_path}')
+        resolved_path = self._resolve_model_path(self.model_path)
+        if not os.path.exists(resolved_path):
+            self.get_logger().error(
+                f'Model not found: "{self.model_path}". '
+                f'Check model_path in tracker_params.yaml or place your .rpk in detection_model/model/.'
+            )
             sys.exit(1)
 
-        self.get_logger().info(f'Loading IMX500 firmware: {os.path.basename(self.model_path)}')
+        self.model_path = resolved_path
+        self.get_logger().info(f'Loading IMX500 firmware: {self.model_path}')
         self.imx500  = IMX500(self.model_path)
         self.picam2  = Picamera2(self.imx500.camera_num)
 

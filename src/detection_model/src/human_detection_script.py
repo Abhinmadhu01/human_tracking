@@ -263,11 +263,19 @@ class YoloTrackerNode(Node):
             return ''
 
     def _resolve_model_path(self):
-        if self.custom_model_path:
-            return self.custom_model_path, 'custom'
-
+        """Find the right model file. Checks custom path first, then auto-detects by model_variant."""
         package_share = get_package_share_directory('detection_model')
         package_root = Path(__file__).resolve().parents[1]
+
+        if self.custom_model_path:
+            if os.path.exists(self.custom_model_path):
+                return os.path.abspath(self.custom_model_path), 'custom'
+            # Try finding it inside the model folder
+            for m_dir in [os.path.join(package_share, 'model'), str(package_root / 'model')]:
+                cand = os.path.join(m_dir, os.path.basename(self.custom_model_path))
+                if os.path.exists(cand):
+                    return os.path.abspath(cand), 'custom'
+            return self.custom_model_path, 'custom'
         workspace_root = Path(__file__).resolve().parents[3]
         model_interface_dir = self._safe_package_dir('model_interface_publisher')
         

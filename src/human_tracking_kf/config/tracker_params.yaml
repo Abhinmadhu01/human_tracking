@@ -9,9 +9,14 @@
   ros__parameters:
 
     # ─── Camera AI / IMX500 (camera_ai_start.py) ─────────────────────────
-    # NOTE: model_path, resolution, fps require container restart.
-    #       conf_threshold and nms_threshold are live-tunable.
-    model_path: "/home/ros/top_human_detection/src/detection_model/model/imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk"
+    # Changing model_path, resolution, or fps needs a restart.
+    # conf_threshold and nms_threshold can be changed live.
+    #
+    # Just put the model filename here. It will be found automatically
+    # from src/detection_model/model/. You can also use a full path.
+    # Available models: imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk,
+    #   imx500_network_nanodet_plus_416x416_pp.rpk, yolo11n_base.rpk, yolo11s_base.rpk
+    model_path: "imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk"
     resolution: "640x480"
     fps: 30
     conf_threshold: 0.40
@@ -128,8 +133,10 @@
     frame_rate: 20.0               # Expected detection rate (fps)
 
     # ─── YOLO Detector Parameters ────────────────────────────────────────
+    # model_variant options: yolo11m, yolo11n, pt, onnx, openvino, ncnn, auto
     model_variant: "pt"
-    custom_model_path: "yolo11n_base.rpk"         # Just the filename triggers auto-download
+    # Just the filename is enough — it will be found in src/detection_model/model/
+    custom_model_path: "yolo11n_base.rpk"
     conf: 0.4                      # Increased to 0.6 to stop grass detection
     min_confidence: 0.6            # Post-filter minimum confidence
     imgsz: 640                     # Inference resolution (px)
