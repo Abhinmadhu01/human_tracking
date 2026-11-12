@@ -1,0 +1,144 @@
+# =============================================================================
+#  Human Tracking System — Master Configuration
+# =============================================================================
+#  Load via:  ros2 launch human_tracking_kf bytetrack_launch.py
+#  Override:  ros2 launch ... target_altitude:=5.0
+# =============================================================================
+
+/**:
+  ros__parameters:
+
+    # ─── Camera AI / IMX500 (camera_ai_start.py) ─────────────────────────
+    # NOTE: model_path, resolution, fps require container restart.
+    #       conf_threshold and nms_threshold are live-tunable.
+    model_path: "/home/ros/top_human_detection/src/detection_model/model/imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk"
+    resolution: "640x480"
+    fps: 30
+    conf_threshold: 0.40
+    nms_threshold: 0.45
+
+    # ─── Camera Intrinsics ───────────────────────────────────────────────
+    image_width: 640
+    image_height: 480
+    image_center_x: 320.0          # Principal point X (pixels)
+    image_center_y: 240.0          # Principal point Y (pixels)
+    camera_focal_length_px: 460.64  # Focal length in pixels (from active ROS2 camera_info calibration)
+
+    # ─── Topics ──────────────────────────────────────────────────────────
+    detections_topic: "/tracked_detections"
+    input_topic: "/detections"
+    output_topic: "/tracked_detections"
+
+    # ─── Flight Mode Guard ───────────────────────────────────────────────
+    # Velocity commands are only published when FC is armed AND in one of
+    # these modes.  Empty list = always publish (DANGEROUS).
+    allowed_modes: ["GUIDED", "AUTO"]
+
+    # ─── Target ──────────────────────────────────────────────────────────
+        # ─── Target ──────────────────────────────────────────────────────────
+    target_class: "person"
+    target_altitude: 8.0           # Desired hover altitude (m AGL)
+    target_distance_m: 1.0        # Desired horizontal distance to target (m)
+    distance_tolerance_m: 0.2      # Tighter dead-band around target distance (m)
+    person_height_m: 1.70          # Standard person height (for better dist estimation)
+    min_box_height_px: 50.0        # Reject detections smaller than this
+    target_box_height: 380.0       # Desired bbox height when at target dist
+    height_tolerance: 15.0         # Bbox height dead-band (px)
+    fwd_sign: 1.0                  # +1 = camera faces forward, -1 = backward
+
+    # ─── Safety / Geofence ───────────────────────────────────────────────
+    max_range_m: 50.0              # Max distance from home before failsafe
+    min_altitude: 2.0              # Hard floor (m AGL) — never descend below
+    max_altitude: 50.0             # Hard ceiling (m AGL) — never climb above
+    detection_heartbeat_timeout: 10.0  # If no detection msg for this long → failsafe
+    failsafe_action: "hover"       # "hover" | "rtl" | "land"
+    max_search_time: 120.0         # Max search duration before failsafe (s)
+
+    # ─── Search Pattern ──────────────────────────────────────────────────
+    default_search_yaw_sign: -1.0  # -1 = clockwise, +1 = anti-clockwise
+    search_speed: 0.3              # Forward speed during search (m/s)
+    initial_radius: 1.0            # Starting spiral radius (m)
+    spiral_growth: 0.1             # Radius growth rate (m/s)
+    search_max_radius: 5.0         # Cap spiral radius (m)
+    search_min_yaw_rate: 0.2       # Minimum yaw rate during search (rad/s)
+    recovery_time: 5.0             # Hold position before searching (s)
+    detection_timeout: 0.8        # Detection age to consider "lost" (s)
+
+    # ─── Kalman Filter (pixel-space 2D tracker) ─────────────────────────
+    use_kalman_filter: true
+    kf_dt: 0.05                    # Prediction step (should match control rate)
+    kf_accel_std: 20.0             # Process noise — higher = trust measurements more
+    kf_meas_std: 5.0               # Measurement noise — YOLO bbox jitter (~3-8 px)
+    kf_gate_sigma: 4.0             # Mahalanobis gate — reject wild detections (0=off)
+    kf_init_pos_std: 10.0          # Initial position uncertainty (px)
+    kf_init_vel_std: 50.0          # Initial velocity uncertainty (px/s)
+
+    # ─── PID Gains — Strafe (lateral centering) ─────────────────────────
+    measurement_alpha: 0.7         # EMA smoothing on raw measurements (0-1)
+    kp_strafe: 0.01
+    ki_strafe: 0.0
+    kd_strafe: 0.0001
+    int_strafe_lim: 200.0
+
+    # ─── PID Gains — Distance (forward/backward) ────────────────────────
+    kp_dist_m: 0.15               # Gain on distance error (m)
+    ki_dist_m: 0.0
+    kd_dist_m: 0.002
+    int_dist_m_lim: 5.0
+    kp_dist: 0.000                 # Fallback: gain on bbox height error (px)
+
+    # ─── PID Gains — Yaw ────────────────────────────────────────────────
+    kp_yaw: 0.003
+    ki_yaw: 0.0002
+    kd_yaw: 0.0001
+    int_yaw_lim: 200.0
+
+    # ─── PID Gains — Altitude ───────────────────────────────────────────
+    kp_alt: 0.45
+    ki_alt: 0.0
+    kd_alt: 0.0
+    int_alt_lim: 1.0
+
+    # ─── Dead-bands ──────────────────────────────────────────────────────
+    center_deadband_px: 20.0       # Ignore lateral error below this (px)
+    yaw_deadband_px: 25.0          # Ignore yaw correction below this (px)
+
+    # ─── Velocity & Acceleration Limits ──────────────────────────────────
+    max_vx: 3.0                    # Max forward/backward speed (m/s)
+    max_vy: 1.2                   # Max lateral speed (m/s)
+    max_vz: 1.2                    # Max vertical speed (m/s)
+    max_yaw_rate: 0.4              # Max yaw rate (rad/s)
+
+    # ─── Command Smoother ────────────────────────────────────────────────
+    cmd_smoothing_alpha: 0.6       # EMA on velocity commands (0=frozen, 1=instant)
+    max_ax: 0.5                    # Max forward acceleration (m/s²)
+    max_ay: 0.5                    # Max lateral acceleration (m/s²)
+    max_az: 0.3                    # Max vertical acceleration (m/s²)
+    max_yaw_accel: 0.4             # Max yaw acceleration (rad/s²)
+
+    # ─── Logging ─────────────────────────────────────────────────────────
+    log_interval_sec: 0.5
+
+    # ─── ByteTrack Parameters ────────────────────────────────────────────
+    track_thresh: 0.3              # Lower threshold so flickering dets still get associated
+    track_buffer: 150              # Frames to keep lost tracks (~7.5s at 20fps) — survives flicker gaps
+    match_thresh: 0.5              # More lenient IoU matching for jittery bbox positions
+    min_track_age: 1               # Publish immediately — don't wait for N frames (critical for flicker)
+    max_track_age: 60              # Keep tracks alive longer when unseen
+    frame_rate: 20.0               # Expected detection rate (fps)
+
+    # ─── YOLO Detector Parameters ────────────────────────────────────────
+    model_variant: "pt"
+    custom_model_path: "yolo11n_base.rpk"         # Just the filename triggers auto-download
+    conf: 0.4                      # Increased to 0.6 to stop grass detection
+    min_confidence: 0.6            # Post-filter minimum confidence
+    imgsz: 640                     # Inference resolution (px)
+    max_det: 20                    # Max detections per frame
+    nms_iou_threshold: 0.45        # NMS IoU threshold
+    use_half_precision: true       # FP16 inference (GPU only)
+    publish_all_detections: true   # Publish all vs best-only
+    publish_debug_image: false     # Publish annotated debug image
+    save_detections: false         # Save detection frames to disk
+    max_bbox_width_ratio: 0.98     # Reject bbox wider than this fraction of image
+    max_bbox_height_ratio: 0.98
+    max_bbox_area_ratio: 0.9

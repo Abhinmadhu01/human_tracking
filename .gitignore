@@ -1,0 +1,47 @@
+# -------------------------------------------------------------
+# Ignore all files and directories in root by default
+# -------------------------------------------------------------
+/*
+
+# -------------------------------------------------------------
+# Allowlist: Keep .gitignore, gstream_human_detection.py, and src/
+# -------------------------------------------------------------
+!.gitignore
+!/gstream_human_detection.py
+!/gstream human detection.py
+!/src/
+
+# -------------------------------------------------------------
+# Rules inside src/
+# -------------------------------------------------------------
+# Colcon / ROS build artifacts
+build/
+install/
+log/
+
+# Python caches and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large model weights (large files — use git-lfs or download separately)
+*.pt
+*.onnx
+*.engine
+*.trt
+
+# Debug logs and output
+*.log
+collected_false_positives/
+pid_comparison.png
