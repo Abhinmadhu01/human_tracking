@@ -9,12 +9,8 @@ endif()
 find_package(ament_cmake REQUIRED)
 
 install(PROGRAMS
-  src/human_detection_script.py
-  src/detection_stream_publisher.py
   src/camera_ai_start.py
-  src/detection_smoother.py
   DESTINATION lib/${PROJECT_NAME}
-
 )
 
 

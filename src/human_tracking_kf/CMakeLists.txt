@@ -9,11 +9,9 @@ endif()
 find_package(ament_cmake REQUIRED)
 
 install(PROGRAMS
-  src/kalman_tracker.py
   src/person_tracking.py
   src/bytetrack_tracker.py
   DESTINATION lib/${PROJECT_NAME}
-
 )
 
 
