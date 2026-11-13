@@ -4,12 +4,15 @@
 /*
 
 # -------------------------------------------------------------
-# Allowlist: Keep .gitignore, gstream_human_detection.py, and src/
+# Allowlist: Keep .gitignore, documentation, scripts, and src/
 # -------------------------------------------------------------
 !.gitignore
+!/README.md
+!/SAFETY.md
+!/LICENSE
 !/gstream_human_detection.py
-!/gstream human detection.py
 !/src/
+!/docs/
 
 # -------------------------------------------------------------
 # Rules inside src/
