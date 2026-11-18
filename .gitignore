@@ -13,6 +13,7 @@
 !/gstream_human_detection.py
 !/src/
 !/docs/
+!/gazebo_model/
 
 # -------------------------------------------------------------
 # Rules inside src/
